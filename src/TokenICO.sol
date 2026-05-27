@@ -49,6 +49,8 @@ contract TokenICO is Ownable, ReentrancyGuard {
     error TokenICO__SaleAlreadyFinalized();
     error TokenICO__SaleNotFinalized();
     error TokenICO__SaleAborted();
+    error TokenICO__SaleNotFinalizedForRefund();
+    error TokenICO__NothingToRefund();
 
     /////////////////
     // Types       //
@@ -151,6 +153,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
     event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
     event TokensClaimed(address indexed user, uint256 amount);
     event SaleFinalizedSuccessfully(uint256 timestamp);
+    event PaymentRefund(address indexed user, uint256 amount);
     event SaleRefundEnabled(uint256 timestamp);
 
     /////////////////
@@ -315,7 +318,28 @@ contract TokenICO is Ownable, ReentrancyGuard {
         emit TokensClaimed(msg.sender, claimableAmount);
     }
 
-    function refund() external {}
+    /**
+     * @notice Allows users to claim a refund of their deposited payment tokens
+     * if the ICO sale has been finalized in refund mode.
+     *
+     * @dev Reverts if the sale is not in the REFUND state or if the caller
+     * has no refundable balance. User balances are cleared before transferring tokens.
+     *
+     * Emits a {PaymentRefund} event upon successful refund.
+     */
+    function refund() external {
+        if (sSaleFinalized != SaleFinalized.REFUND) revert TokenICO__SaleNotFinalizedForRefund();
+
+        UserData storage userData = sUserData[msg.sender];
+        uint256 depositedAmount = userData.paymentTokenAmount;
+        if (depositedAmount == 0) revert TokenICO__NothingToRefund();
+
+        userData.paymentTokenAmount = 0;
+        userData.saleTokenAmount = 0;
+        IERC20(I_PAYMENT_TOKEN).safeTransfer(msg.sender, depositedAmount);
+
+        emit PaymentRefund(msg.sender, depositedAmount);
+    }
 
     //////////////////////////
     // Internal Functions   //
