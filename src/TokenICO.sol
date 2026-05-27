@@ -16,6 +16,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * purchase tokens during an Initial Coin Offering (ICO) with built-in vesting mechanisms
  * to prevent immediate token dumps and encourage long-term alignment.
  *
+ * This ICO system has the following properties:
+ * - Initial token unlock support and built in vesting for remianing tokens
+ * - Linear token vesting with a cliff period for participants ()
+ * - Linear vesting begins when saleFinalized but remains locked until cliff expiry
+ * - Cap (hard cap & soft cap) on total token distribution during the sale
+ * - Token distribution will not proceed if the soft cap is not reached, and users will be eligible for a full refund.
+ *
+ * Vesting starts when the sale is finalized. Any initial unlock percentage becomes claimable immediately,
+ * while the remaining locked tokens stay inaccessible during the cliff period. After the cliff expires, locked
+ * tokens are released linearly over the vesting duration.
+ *
  * @notice This contract is the core of the Initial Coin Offering system. It handles all
  * logic for contributing funds, allocating tokens, and managing vesting-based claims.
  *
@@ -29,6 +40,15 @@ contract TokenICO is Ownable, ReentrancyGuard {
     error TokenICO__InsufficientAmount();
     error TokenICO__AllTokenSold();
     error TokenICO__MaxTokensPerUserExceeded();
+    error TokenICO__InvalidVestingDuration();
+    error TokenICO__InvalidCliffDuration();
+    error TokenICO__InvalidInitialUnlockPercentage();
+    error TokenICO__SaleNotEnded();
+    error TokenICO__NoIcoToken();
+    error TokenICO__NotEnoughIcoToken();
+    error TokenICO__SaleAlreadyFinalized();
+    error TokenICO__SaleNotFinalized();
+    error TokenICO__SaleAborted();
 
     /////////////////
     // Types       //
@@ -79,6 +99,9 @@ contract TokenICO is Ownable, ReentrancyGuard {
     /// @dev Current sale finalization status
     SaleFinalized public sSaleFinalized;
 
+    /// @dev Timestamp when vesting starts
+    uint256 public sFinalizeTime;
+
     /// @dev Stores purchase and vesting data for each user
     mapping(address user => UserData data) public sUserData;
 
@@ -86,6 +109,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
     // Constants      //
     ////////////////////
     uint256 private constant PRECISION = 1e18;
+    uint256 private constant PERCENTAGE_PRECISION = 100e18;
 
     ///////////////////////////
     // Immutable Variables   //
@@ -112,10 +136,22 @@ contract TokenICO is Ownable, ReentrancyGuard {
     /// @dev Maximum number of tokens a single user can purchase
     uint256 public immutable I_MAX_TOKEN_PER_USER;
 
+    /// @dev Total duration over which purchased tokens vest
+    uint256 public immutable I_VESTING_DURATION;
+
+    /// @dev Duration before locked tokens begin vesting release
+    uint256 public immutable I_CLIFF_DURATION;
+
+    /// @dev Initial unlock percentage should be in 18-decimal precision
+    uint256 public immutable I_INITIAL_UNLOCK_PERCENTAGE;
+
     /////////////////
     // Events      //
     /////////////////
     event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
+    event TokensClaimed(address indexed user, uint256 amount);
+    event SaleFinalizedSuccessfully(uint256 timestamp);
+    event SaleRefundEnabled(uint256 timestamp);
 
     /////////////////
     // Functions   //
@@ -129,6 +165,10 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @param maxTokenForSale Maximum number of tokens available for sale
      * @param softCap Minimum amount of funds in usd required for a successful sale
      * @param maxTokenPerUser Maximum number of tokens a single user can purchase
+     * @param vestingDuration Total duration over which tokens vest
+     * @param cliffDuration Duration before any tokens become claimable
+     * @param initialUnlockPercentage percentage of token unlock at finalize (should be in 18-decimal precision)
+     * @dev Reverts if vestingDuration is zero, cliffDuration exceeds vestingDuration, or vestingStart is before sale end
      * @dev Sets initial sale state to PENDING
      */
     constructor(
@@ -138,8 +178,15 @@ contract TokenICO is Ownable, ReentrancyGuard {
         uint256 saleEndTime,
         uint256 maxTokenForSale,
         uint256 softCap,
-        uint256 maxTokenPerUser
+        uint256 maxTokenPerUser,
+        uint256 vestingDuration,
+        uint256 cliffDuration,
+        uint256 initialUnlockPercentage
     ) Ownable(msg.sender) {
+        if (vestingDuration == 0) revert TokenICO__InvalidVestingDuration();
+        if (vestingDuration < cliffDuration) revert TokenICO__InvalidCliffDuration();
+        if (initialUnlockPercentage > PERCENTAGE_PRECISION) revert TokenICO__InvalidInitialUnlockPercentage();
+
         I_PAYMENT_TOKEN = paymentTokenAddress;
         I_PRICE_FEED = priceFeedAddress;
         I_SALE_TOKEN_PRICE = saleTokenPrice;
@@ -147,6 +194,9 @@ contract TokenICO is Ownable, ReentrancyGuard {
         I_MAX_TOKEN_FOR_SALE = maxTokenForSale;
         I_SOFT_CAP = softCap;
         I_MAX_TOKEN_PER_USER = maxTokenPerUser;
+        I_VESTING_DURATION = vestingDuration;
+        I_CLIFF_DURATION = cliffDuration;
+        I_INITIAL_UNLOCK_PERCENTAGE = initialUnlockPercentage;
 
         sSaleFinalized = SaleFinalized.PENDING;
     }
@@ -158,12 +208,47 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @notice Sets the ERC20 token that will be distributed to participants
      * @param saleTokenAddress The address of the sale token contract
      * @dev Only callable by the contract owner
+     * @dev Sale token MUST use 18 decimals
      */
     function setSaleToken(address saleTokenAddress) external onlyOwner {
         sSaleToken = saleTokenAddress;
     }
 
-    function finalizeSale() external onlyOwner {}
+    /**
+     * @notice Finalizes the ICO after the sale period has ended
+     * @dev If the soft cap is not reached, the sale enters REFUND mode
+     *      allowing users to reclaim their contributed payment tokens.
+     *      Otherwise, the sale becomes SUCCESSFUL and vesting starts.
+     *
+     * Requirements:
+     * - Sale end time must have passed
+     * - Sale token must be configured
+     * - Contract must hold enough sale tokens for all buyers
+     *
+     * Emits a {SaleRefundEnabled} event if soft cap is not reached.
+     * Emits a {SaleFinalizedSuccessfully} event if finalized successfully.
+     */
+    function finalizeSale() external onlyOwner {
+        if (sSaleFinalized != SaleFinalized.PENDING) revert TokenICO__SaleAlreadyFinalized();
+
+        uint256 timestamp = block.timestamp;
+        if (timestamp <= I_SALE_END_TIME) revert TokenICO__SaleNotEnded();
+
+        uint256 raisedUsd = (sTokensSold * I_SALE_TOKEN_PRICE) / PRECISION;
+        if (raisedUsd < I_SOFT_CAP) {
+            sSaleFinalized = SaleFinalized.REFUND;
+            emit SaleRefundEnabled(timestamp);
+            return;
+        }
+
+        if (sSaleToken == address(0)) revert TokenICO__NoIcoToken();
+        if (IERC20(sSaleToken).balanceOf(address(this)) < sTokensSold) revert TokenICO__NotEnoughIcoToken();
+
+        sFinalizeTime = timestamp;
+        sSaleFinalized = SaleFinalized.SUCCESSFUL;
+
+        emit SaleFinalizedSuccessfully(timestamp);
+    }
 
     function withdrawFunds() external onlyOwner {}
 
@@ -178,10 +263,12 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @notice This function transfers accepted payment tokens from the user
      *         and records the purchased sale token allocation in storage
      * @dev Purchased sale tokens are tracked in a mapping and can be claimed
-     *         later through a calim function
+     *         later through a claim function
+     *
+     * Emits a {TokensPurchased} event if token purchased successfully
      */
     function buyTokens(uint256 usdAmount) external nonReentrant {
-        if (block.timestamp > I_SALE_END_TIME) revert TokenICO__SaleIsOver();
+        if (sSaleFinalized != SaleFinalized.PENDING) revert TokenICO__SaleIsOver();
         if (usdAmount < I_SALE_TOKEN_PRICE) revert TokenICO__InsufficientAmount();
 
         UserData storage userData = sUserData[msg.sender];
@@ -205,7 +292,28 @@ contract TokenICO is Ownable, ReentrancyGuard {
         emit TokensPurchased(msg.sender, paymentTokenAmount, saleTokensToBuy);
     }
 
-    function claim() external {}
+    /**
+     * @notice Claims intial unlocked & vested sale tokens allocated to the caller
+     * @dev Reverts if no tokens are currently claimable.
+     *      Claimable amount includes:
+     *      - Initial unlock percentage
+     *      - Linear vested portion after cliff duration
+     * @dev Caller must have claimable vested tokens else revert
+     *
+     * Emits a {TokensClaimed} event if token claimed successfully
+     */
+    function claim() external nonReentrant {
+        uint256 claimableAmount = getClaimableTokenAmount();
+        if (claimableAmount == 0) revert TokenICO__NeedsMoreThanZero();
+
+        UserData storage userData = sUserData[msg.sender];
+
+        userData.claimedAmount += claimableAmount;
+        sTokensClaimed += claimableAmount;
+        IERC20(sSaleToken).safeTransfer(msg.sender, claimableAmount);
+
+        emit TokensClaimed(msg.sender, claimableAmount);
+    }
 
     function refund() external {}
 
@@ -216,17 +324,62 @@ contract TokenICO is Ownable, ReentrancyGuard {
         return 10 ** IERC20Metadata(token).decimals();
     }
 
+    /**
+     * @notice Calculates the amount of vested tokens available at a given timestamp
+     * @param totalAllocation Total Locked token allocation assigned to a user
+     * @param timestamp The timestamp used to calculate vested tokens
+     * @return The total vested token amount available at the given timestamp
+     * @dev Implements linear vesting with a cliff period before vesting begins
+     */
+    function _vestedTokenAmount(uint256 totalAllocation, uint256 timestamp) internal view returns (uint256) {
+        uint256 vestingStart = sFinalizeTime + I_CLIFF_DURATION;
+        uint256 vestingEnd = vestingStart + I_VESTING_DURATION;
+
+        if (timestamp < vestingStart) {
+            return 0;
+        } else if (timestamp >= vestingEnd) {
+            return totalAllocation;
+        } else {
+            return (totalAllocation * (timestamp - vestingStart)) / I_VESTING_DURATION;
+        }
+    }
+
     ///////////////////////////////
     // Public & View Functions   //
     ///////////////////////////////
-    function vestedTokenAmount(uint256 totalAllocation, uint256 timestamp) public view returns (uint256) {}
+    /**
+     * @notice Returns the amount of vested sale tokens claimable by the caller
+     * @return claimableToken The amount of tokens currently claimable
+     * @dev Claimable amount consists of:
+     *      - Initial unlock amount available immediately after finalization
+     *      - Additional vested tokens unlocked linearly after cliff duration
+     *
+     * Reverts if:
+     * - Sale is not finalized
+     * - Sale entered refund mode
+     */
+    function getClaimableTokenAmount() public view returns (uint256) {
+        if (sSaleFinalized == SaleFinalized.PENDING) revert TokenICO__SaleNotFinalized();
+        if (sSaleFinalized == SaleFinalized.REFUND) revert TokenICO__SaleAborted();
+
+        UserData memory userData = sUserData[msg.sender];
+        uint256 totalTokenAmount = userData.saleTokenAmount;
+
+        uint256 intialUnlockToken = totalTokenAmount * I_INITIAL_UNLOCK_PERCENTAGE / PERCENTAGE_PRECISION;
+        uint256 lockedToken = totalTokenAmount - intialUnlockToken;
+        uint256 vestedToken = _vestedTokenAmount(lockedToken, block.timestamp);
+
+        uint256 claimableToken = intialUnlockToken + vestedToken - userData.claimedAmount;
+
+        return claimableToken;
+    }
 
     /**
      * @notice Converts a USD-denominated amount into the equivalent payment token amount
      * @param token The ERC20 payment token address
      * @param usdAmount The USD amount (18 decimals precision)
      * @return The equivalent amount of payment tokens required
-     * @dev Uses Chainlink price feeds for token/USD conversion
+     * @dev Uses Chainlink price feeds for token/USD conversion & OracleLib for stale check
      */
     function getTokenAmountFromUsd(address token, uint256 usdAmount) public view returns (uint256) {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(I_PRICE_FEED);
