@@ -50,7 +50,9 @@ contract TokenICO is Ownable, ReentrancyGuard {
     error TokenICO__SaleNotFinalized();
     error TokenICO__SaleAborted();
     error TokenICO__SaleNotFinalizedForRefund();
+    error TokenICO__SaleNotFinalizedAsSuccessful();
     error TokenICO__NothingToRefund();
+    error TokenICO__NotEnoughFunds();
 
     /////////////////
     // Types       //
@@ -155,6 +157,8 @@ contract TokenICO is Ownable, ReentrancyGuard {
     event SaleFinalizedSuccessfully(uint256 timestamp);
     event PaymentRefund(address indexed user, uint256 amount);
     event SaleRefundEnabled(uint256 timestamp);
+    event FundsWithdrawn(uint256 amount);
+    event UnsoldTokensWithdrawn(uint256 amount);
 
     /////////////////
     // Functions   //
@@ -169,7 +173,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @param softCap Minimum amount of funds in usd required for a successful sale
      * @param maxTokenPerUser Maximum number of tokens a single user can purchase
      * @param vestingDuration Total duration over which tokens vest
-     * @param cliffDuration Duration before any tokens become claimable
+     * @param cliffDuration Duration after that any tokens become claimable
      * @param initialUnlockPercentage percentage of token unlock at finalize (should be in 18-decimal precision)
      * @dev Reverts if vestingDuration is zero, cliffDuration exceeds vestingDuration, or vestingStart is before sale end
      * @dev Sets initial sale state to PENDING
@@ -240,6 +244,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
         uint256 raisedUsd = (sTokensSold * I_SALE_TOKEN_PRICE) / PRECISION;
         if (raisedUsd < I_SOFT_CAP) {
             sSaleFinalized = SaleFinalized.REFUND;
+            sTokensSold = 0;
             emit SaleRefundEnabled(timestamp);
             return;
         }
@@ -253,9 +258,47 @@ contract TokenICO is Ownable, ReentrancyGuard {
         emit SaleFinalizedSuccessfully(timestamp);
     }
 
-    function withdrawFunds() external onlyOwner {}
+    /**
+     * @notice Withdraws all collected payment funds after a successful ICO
+     * @dev Can only be called by the contract owner after the sale
+     *      has been finalized successfully
+     * reverts if sale not finalized as successful & if there are no
+     * payment tokens to withdraw
+     *
+     * Emits a {FundsWithdrawn} event if funds withdrawn completed
+     */
+    function withdrawFunds() external nonReentrant onlyOwner {
+        if (sSaleFinalized != SaleFinalized.SUCCESSFUL) revert TokenICO__SaleNotFinalizedAsSuccessful();
 
-    function withdrawUnsoldTokens() external onlyOwner {}
+        uint256 balance = IERC20(I_PAYMENT_TOKEN).balanceOf(address(this));
+        if (balance == 0) revert TokenICO__NotEnoughFunds();
+
+        IERC20(I_PAYMENT_TOKEN).safeTransfer(owner(), balance);
+        emit FundsWithdrawn(balance);
+    }
+
+    /**
+     * @notice Withdraws unsold ICO tokens after the sale is finalized
+     * @dev Ensures enough tokens remain in the contract for users
+     * who have purchased but not yet claimed their allocations
+     * if the sale is still pending& if there are no excess tokens available for withdrawal
+     *
+     * Emits a {UnsoldTokensWithdrawn} event if unsold tokens withdrawn completed
+     */
+    function withdrawUnsoldTokens() external nonReentrant onlyOwner {
+        if (sSaleFinalized == SaleFinalized.PENDING) revert TokenICO__SaleNotFinalized();
+
+        uint256 minimumRequiredBalance = sTokensSold - sTokensClaimed;
+        address saleToken = sSaleToken;
+        uint256 saleTokenBalance = IERC20(saleToken).balanceOf(address(this));
+
+        if (saleTokenBalance <= minimumRequiredBalance) revert TokenICO__NotEnoughIcoToken();
+
+        uint256 unsoldAmount = saleTokenBalance - (minimumRequiredBalance);
+
+        IERC20(saleToken).safeTransfer(msg.sender, unsoldAmount);
+        emit UnsoldTokensWithdrawn(unsoldAmount);
+    }
 
     //////////////////////////
     // External Functions   //
@@ -271,6 +314,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * Emits a {TokensPurchased} event if token purchased successfully
      */
     function buyTokens(uint256 usdAmount) external nonReentrant {
+        if (block.timestamp > I_SALE_END_TIME) revert TokenICO__SaleIsOver();
         if (sSaleFinalized != SaleFinalized.PENDING) revert TokenICO__SaleIsOver();
         if (usdAmount < I_SALE_TOKEN_PRICE) revert TokenICO__InsufficientAmount();
 
