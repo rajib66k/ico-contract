@@ -17,8 +17,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * to prevent immediate token dumps and encourage long-term alignment.
  *
  * This ICO system has the following properties:
- * - Initial token unlock support and built in vesting for remianing tokens
- * - Linear token vesting with a cliff period for participants ()
+ * - Initial token unlock support and built-in vesting for remaining tokens
+ * - Linear token vesting with a cliff period for participants
  * - Linear vesting begins when saleFinalized but remains locked until cliff expiry
  * - Cap (hard cap & soft cap) on total token distribution during the sale
  * - Token distribution will not proceed if the soft cap is not reached, and users will be eligible for a full refund.
@@ -173,7 +173,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @param softCap Minimum amount of funds in usd required for a successful sale
      * @param maxTokenPerUser Maximum number of tokens a single user can purchase
      * @param vestingDuration Total duration over which tokens vest
-     * @param cliffDuration Duration after that any tokens become claimable
+    * @param cliffDuration Duration before vested locked tokens become claimable
      * @param initialUnlockPercentage percentage of token unlock at finalize (should be in 18-decimal precision)
      * @dev Reverts if vestingDuration is zero, cliffDuration exceeds vestingDuration, or vestingStart is before sale end
      * @dev Sets initial sale state to PENDING
@@ -344,7 +344,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @dev Reverts if no tokens are currently claimable.
      *      Claimable amount includes:
      *      - Initial unlock percentage
-     *      - Linear vested portion after cliff duration
+     *      - Vested locked tokens that become claimable after the cliff duration
      * @dev Caller must have claimable vested tokens else revert
      *
      * Emits a {TokensClaimed} event if token claimed successfully
@@ -397,13 +397,15 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @param totalAllocation Total Locked token allocation assigned to a user
      * @param timestamp The timestamp used to calculate vested tokens
      * @return The total vested token amount available at the given timestamp
-     * @dev Implements linear vesting with a cliff period before vesting begins
+     * @dev Implements linear vesting starting at sale finalization,
+     *      with a cliff period during which vested tokens remain unclaimable
      */
     function _vestedTokenAmount(uint256 totalAllocation, uint256 timestamp) internal view returns (uint256) {
-        uint256 vestingStart = sFinalizeTime + I_CLIFF_DURATION;
+        uint256 vestingStart = sFinalizeTime;
+        uint256 cliffEnd = vestingStart + I_CLIFF_DURATION;
         uint256 vestingEnd = vestingStart + I_VESTING_DURATION;
 
-        if (timestamp < vestingStart) {
+        if (timestamp < cliffEnd) {
             return 0;
         } else if (timestamp >= vestingEnd) {
             return totalAllocation;
