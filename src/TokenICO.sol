@@ -173,7 +173,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
      * @param softCap Minimum amount of funds in usd required for a successful sale
      * @param maxTokenPerUser Maximum number of tokens a single user can purchase
      * @param vestingDuration Total duration over which tokens vest
-    * @param cliffDuration Duration before vested locked tokens become claimable
+     * @param cliffDuration Duration before vested locked tokens become claimable
      * @param initialUnlockPercentage percentage of token unlock at finalize (should be in 18-decimal precision)
      * @dev Reverts if vestingDuration is zero, cliffDuration exceeds vestingDuration, or vestingStart is before sale end
      * @dev Sets initial sale state to PENDING
@@ -371,7 +371,7 @@ contract TokenICO is Ownable, ReentrancyGuard {
      *
      * Emits a {PaymentRefund} event upon successful refund.
      */
-    function refund() external {
+    function refund() external nonReentrant {
         if (sSaleFinalized != SaleFinalized.REFUND) revert TokenICO__SaleNotFinalizedForRefund();
 
         UserData storage userData = sUserData[msg.sender];
