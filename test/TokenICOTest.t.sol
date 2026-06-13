@@ -10,6 +10,8 @@ import {MockV3Aggregator} from "./Mocks/MockV3Aggregator.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 contract MynaTest is Test {
+    event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
+
     MynaToken public mynaToken;
     TokenICO public tokenIco;
     DeployICO public deployer;
@@ -18,7 +20,7 @@ contract MynaTest is Test {
 
     address public user = makeAddr("user");
 
-    uint256 public constant STARTING_USER_BALANCE = 10 ether;
+    uint256 public constant STARTING_USER_BALANCE = 1000 ether;
 
     function setUp() public {
         deployer = new DeployICO();
@@ -98,5 +100,112 @@ contract MynaTest is Test {
         uint256 expectedTokenAmount = usdAmount;
         uint256 tokenAmount = tokenIco.getSaleTokenAmountFromUsd(usdAmount);
         assertEq(tokenAmount, expectedTokenAmount);
+    }
+
+    //////////////////////////
+    // Buy Tokens Tests     //
+    //////////////////////////
+    function _buySaleTokens(address buyer, uint256 usdAmount) internal {
+        ERC20Mock weth = ERC20Mock(activeConfig.weth);
+        weth.mint(buyer, STARTING_USER_BALANCE);
+
+        vm.startPrank(buyer);
+        weth.approve(address(tokenIco), type(uint256).max);
+
+        tokenIco.buyTokens(usdAmount);
+
+        vm.stopPrank();
+    }
+
+    function testBuyTokensRevertsIfSaleTimeOver() public {
+        vm.warp(activeConfig.saleEndTime + 1);
+        vm.startPrank(user);
+        ERC20Mock(activeConfig.weth).approve(address(tokenIco), type(uint256).max);
+
+        MockV3Aggregator mockV3Aggregator = MockV3Aggregator(activeConfig.wethUsdPriceFeed);
+        mockV3Aggregator.updateRoundData(2, 2000e8, block.timestamp, block.timestamp);
+
+        vm.expectRevert(TokenICO.TokenICO__SaleIsOver.selector);
+        tokenIco.buyTokens(100 ether);
+        vm.stopPrank();
+    }
+
+    function testBuyTokensRevertsIfUserBuyLessThanMinimum(uint256 usdAmount) public {
+        usdAmount = bound(usdAmount, 0, tokenIco.I_SALE_TOKEN_PRICE() - 1);
+        vm.startPrank(user);
+        ERC20Mock(activeConfig.weth).approve(address(tokenIco), type(uint256).max);
+
+        vm.expectRevert(TokenICO.TokenICO__InsufficientAmount.selector);
+        tokenIco.buyTokens(usdAmount);
+        vm.stopPrank();
+    }
+
+    function testBuyTokensRevertsIfUserExceedsMaxTokenPerUser() public {
+        uint256 maxTokenPerUserInUsd = (activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice) / 1e18;
+
+        vm.startPrank(user);
+        ERC20Mock(activeConfig.weth).approve(address(tokenIco), type(uint256).max);
+
+        vm.expectRevert(TokenICO.TokenICO__MaxTokensPerUserExceeded.selector);
+        tokenIco.buyTokens(maxTokenPerUserInUsd + 1);
+
+        tokenIco.buyTokens(maxTokenPerUserInUsd);
+
+        vm.expectRevert(TokenICO.TokenICO__MaxTokensPerUserExceeded.selector);
+        tokenIco.buyTokens(1e18);
+        vm.stopPrank();
+
+        (uint256 saleTokenAmount,,) = tokenIco.sUserData(user);
+        assertEq(saleTokenAmount, activeConfig.maxTokenPerUser);
+    }
+
+    function testBuyTokensRevertsIfMaxSaleAmountReached() public {
+        uint256 maxTokenPerUserInUsd = (activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice) / 1e18;
+        uint256 maxTokenForSaleInUsd = (activeConfig.maxTokenForSale * activeConfig.saleTokenPrice) / 1e18;
+
+        uint256 sold;
+
+        while (sold + maxTokenPerUserInUsd <= maxTokenForSaleInUsd) {
+            address newUser = makeAddr(vm.toString(sold));
+            _buySaleTokens(newUser, maxTokenPerUserInUsd);
+            sold += maxTokenPerUserInUsd;
+        }
+
+        address extraUser = makeAddr("extraUser");
+        ERC20Mock weth = ERC20Mock(activeConfig.weth);
+        weth.mint(extraUser, STARTING_USER_BALANCE);
+
+        vm.startPrank(extraUser);
+        weth.approve(address(tokenIco), type(uint256).max);
+
+        vm.expectRevert(TokenICO.TokenICO__AllTokenSold.selector);
+        tokenIco.buyTokens(maxTokenPerUserInUsd);
+
+        vm.stopPrank();
+    }
+
+    function testBuyTokensUpdatesUserDataAndTotalSaleCorrectly(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+
+        vm.startPrank(user);
+        ERC20Mock(activeConfig.weth).approve(address(tokenIco), type(uint256).max);
+
+        uint256 expectedSaleTokenAmount = usdAmount * 1e18 / activeConfig.saleTokenPrice;
+        uint256 expectedPaymentTokenAmount = tokenIco.getTokenAmountFromUsd(activeConfig.weth, usdAmount);
+
+        vm.expectEmit(true, false, false, true);
+        emit TokensPurchased(user, expectedPaymentTokenAmount, expectedSaleTokenAmount);
+        tokenIco.buyTokens(usdAmount);
+        vm.stopPrank();
+
+        (uint256 saleTokenAmount,, uint256 paymentTokenAmount) = tokenIco.sUserData(user);
+        uint256 totalSale = tokenIco.sTokensSold();
+
+        assertEq(saleTokenAmount, expectedSaleTokenAmount);
+        assertEq(paymentTokenAmount, expectedPaymentTokenAmount);
+        assertEq(totalSale, expectedSaleTokenAmount);
+        assertEq(ERC20Mock(activeConfig.weth).balanceOf(address(tokenIco)), expectedPaymentTokenAmount);
     }
 }
