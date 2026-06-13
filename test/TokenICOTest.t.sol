@@ -8,6 +8,7 @@ import {DeployICO} from "../script/DeployICO.s.sol";
 import {HelperConfig} from "../script/HelperConfig.s.sol";
 import {MockV3Aggregator} from "./Mocks/MockV3Aggregator.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract MynaTest is Test {
     event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
@@ -207,5 +208,22 @@ contract MynaTest is Test {
         assertEq(paymentTokenAmount, expectedPaymentTokenAmount);
         assertEq(totalSale, expectedSaleTokenAmount);
         assertEq(ERC20Mock(activeConfig.weth).balanceOf(address(tokenIco)), expectedPaymentTokenAmount);
+    }
+
+    //////////////////////////////
+    // Set Sale Token Tests     //
+    //////////////////////////////
+    function testSetSaleTokenRevertsIfNotOwner() public {
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(user)));
+        tokenIco.setSaleToken(address(mynaToken));
+        vm.stopPrank();
+    }
+
+    function testSetSaleTokenSetsSaleTokenCorrectly() public {
+        vm.startPrank(tokenIco.owner());
+        tokenIco.setSaleToken(address(mynaToken));
+        assertEq(tokenIco.sSaleToken(), address(mynaToken));
+        vm.stopPrank();
     }
 }
