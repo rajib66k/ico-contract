@@ -14,6 +14,7 @@ contract MynaTest is Test {
     event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
     event SaleRefundEnabled(uint256 timestamp);
     event SaleFinalizedSuccessfully(uint256 timestamp);
+    event UnsoldTokensWithdrawn(uint256 unsoldAmount);
 
     MynaToken public mynaToken;
     TokenICO public tokenIco;
@@ -388,5 +389,47 @@ contract MynaTest is Test {
         vm.stopPrank();
 
         assertEq(ERC20Mock(activeConfig.weth).balanceOf(tokenIco.owner()), expectedAmount);
+    }
+
+    ////////////////////////////////////////////
+    // Owner Withdraw Unsold Tokens Tests     //
+    ////////////////////////////////////////////
+    function testWithdrawUnsoldTokensRevertsIfNotOwnerOrSaleFinalizedIsPending() public {
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        tokenIco.withdrawUnsoldTokens();
+        vm.stopPrank();
+
+        vm.startPrank(tokenIco.owner());
+        vm.expectRevert(TokenICO.TokenICO__SaleNotFinalized.selector);
+        tokenIco.withdrawUnsoldTokens();
+        vm.stopPrank();
+    }
+
+    function testWithdrawUnsoldTokensRevertsIfBalanceOfTokenIcoIsLessThanMinimum() public finalizeSaleSuccessful {
+        vm.startPrank(tokenIco.owner());
+        vm.expectRevert(TokenICO.TokenICO__NotEnoughIcoToken.selector);
+        tokenIco.withdrawUnsoldTokens();
+        vm.stopPrank();
+    }
+
+    function testWithdrawUnsoldTokensTransfersUnsoldTokensToOwner() public finalizeSaleSuccessful {
+        uint256 soldToken = tokenIco.sTokensSold();
+        uint256 expectedOwnerBalance = mynaToken.totalSupply() - soldToken;
+
+        vm.startPrank(tokenIco.owner());
+        mynaToken.transfer(address(tokenIco), activeConfig.maxTokenForSale);
+
+        uint256 balanceBefore = mynaToken.balanceOf(tokenIco.owner());
+
+        vm.expectEmit(false, false, false, true);
+        emit UnsoldTokensWithdrawn(activeConfig.maxTokenForSale);
+        tokenIco.withdrawUnsoldTokens();
+        vm.stopPrank();
+
+        uint256 balanceAfter = mynaToken.balanceOf(tokenIco.owner());
+
+        assertEq(balanceAfter - balanceBefore, activeConfig.maxTokenForSale);
+        assertEq(mynaToken.balanceOf(tokenIco.owner()), expectedOwnerBalance);
     }
 }
