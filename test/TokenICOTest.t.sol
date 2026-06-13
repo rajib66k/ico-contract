@@ -12,6 +12,8 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract MynaTest is Test {
     event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
+    event SaleRefundEnabled(uint256 timestamp);
+    event SaleFinalizedSuccessfully(uint256 timestamp);
 
     MynaToken public mynaToken;
     TokenICO public tokenIco;
@@ -224,6 +226,89 @@ contract MynaTest is Test {
         vm.startPrank(tokenIco.owner());
         tokenIco.setSaleToken(address(mynaToken));
         assertEq(tokenIco.sSaleToken(), address(mynaToken));
+        vm.stopPrank();
+    }
+
+    /////////////////////////////
+    // Finalize Sale Tests     //
+    /////////////////////////////
+    function testFinalizeSaleRevertsIfNotOwnerOrSaleOrOverOrSaleIsNotPending() public {
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(user)));
+        tokenIco.finalizeSale();
+        vm.stopPrank();
+
+        vm.startPrank(tokenIco.owner());
+        vm.expectRevert(TokenICO.TokenICO__SaleNotEnded.selector);
+        tokenIco.finalizeSale();
+
+        vm.warp(activeConfig.saleEndTime + 1);
+        tokenIco.finalizeSale();
+
+        vm.expectRevert(TokenICO.TokenICO__SaleAlreadyFinalized.selector);
+        tokenIco.finalizeSale();
+        vm.stopPrank();
+    }
+
+    function testFinalizeSaleIfSoftCapReachedRevertsIfNoSaleTokenSetOrNotEnoughTokens() public {
+        uint256 maxTokenPerUserInUsd = (activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice) / 1e18;
+
+        uint256 sold;
+
+        while (sold < activeConfig.softCap) {
+            address newUser = makeAddr(vm.toString(sold));
+            _buySaleTokens(newUser, maxTokenPerUserInUsd);
+            sold += maxTokenPerUserInUsd;
+        }
+
+        vm.warp(activeConfig.saleEndTime + 1);
+
+        vm.startPrank(tokenIco.owner());
+        vm.expectRevert(TokenICO.TokenICO__NoIcoToken.selector);
+        tokenIco.finalizeSale();
+
+        tokenIco.setSaleToken(address(mynaToken));
+        mynaToken.transfer(address(tokenIco), activeConfig.softCap - 1);
+
+        vm.expectRevert(TokenICO.TokenICO__NotEnoughIcoToken.selector);
+        tokenIco.finalizeSale();
+        vm.stopPrank();
+
+        assert(tokenIco.sSaleFinalized() == TokenICO.SaleFinalized.PENDING);
+    }
+
+    function testFinalizeSaleUpdatesStateAsRefundIfSoftCapNotReached() public {
+        vm.startPrank(tokenIco.owner());
+        vm.warp(activeConfig.saleEndTime + 1);
+        vm.expectEmit(false, false, false, true);
+        emit SaleRefundEnabled(block.timestamp);
+        tokenIco.finalizeSale();
+        assert(tokenIco.sSaleFinalized() == TokenICO.SaleFinalized.REFUND);
+        vm.stopPrank();
+    }
+
+    function testFinalizeSaleUpdatesStateAsSuccessfulIfSoftCapReached() public {
+        uint256 maxTokenPerUserInUsd = (activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice) / 1e18;
+
+        uint256 sold;
+
+        while (sold < activeConfig.softCap) {
+            address newUser = makeAddr(vm.toString(sold));
+            _buySaleTokens(newUser, maxTokenPerUserInUsd);
+            sold += maxTokenPerUserInUsd;
+        }
+
+        vm.warp(activeConfig.saleEndTime + 1);
+
+        vm.startPrank(tokenIco.owner());
+        tokenIco.setSaleToken(address(mynaToken));
+        mynaToken.transfer(address(tokenIco), sold);
+
+        vm.expectEmit(false, false, false, true);
+        emit SaleFinalizedSuccessfully(block.timestamp);
+        tokenIco.finalizeSale();
+
+        assert(tokenIco.sSaleFinalized() == TokenICO.SaleFinalized.SUCCESSFUL);
         vm.stopPrank();
     }
 }
