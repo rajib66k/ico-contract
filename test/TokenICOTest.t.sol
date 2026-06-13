@@ -311,4 +311,82 @@ contract MynaTest is Test {
         assert(tokenIco.sSaleFinalized() == TokenICO.SaleFinalized.SUCCESSFUL);
         vm.stopPrank();
     }
+
+    ////////////////////////////////////
+    // Owner Withdraw Funds Tests     //
+    ////////////////////////////////////
+    modifier finalizeSaleSuccessful() {
+        uint256 maxTokenPerUserInUsd = (activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice) / 1e18;
+
+        uint256 sold;
+
+        while (sold < activeConfig.softCap) {
+            address newUser = makeAddr(vm.toString(sold));
+            _buySaleTokens(newUser, maxTokenPerUserInUsd);
+            sold += maxTokenPerUserInUsd;
+        }
+
+        vm.warp(activeConfig.saleEndTime + 1);
+
+        vm.startPrank(tokenIco.owner());
+        tokenIco.setSaleToken(address(mynaToken));
+        mynaToken.transfer(address(tokenIco), sold);
+        tokenIco.finalizeSale();
+        vm.stopPrank();
+
+        assert(tokenIco.sSaleFinalized() == TokenICO.SaleFinalized.SUCCESSFUL);
+        _;
+    }
+
+    function testWithdrawFundsRevertsIfNotOwnerOrSaleFinalizedIsNotSuccessful(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        tokenIco.withdrawFunds();
+        vm.stopPrank();
+
+        vm.startPrank(tokenIco.owner());
+        vm.expectRevert(TokenICO.TokenICO__SaleNotFinalizedAsSuccessful.selector);
+        tokenIco.withdrawFunds();
+        vm.stopPrank();
+
+        _buySaleTokens(user, usdAmount);
+
+        vm.warp(activeConfig.saleEndTime + 1);
+        MockV3Aggregator mockV3Aggregator = MockV3Aggregator(activeConfig.wethUsdPriceFeed);
+        mockV3Aggregator.updateRoundData(2, 2000e8, block.timestamp, block.timestamp);
+
+        vm.startPrank(tokenIco.owner());
+        tokenIco.finalizeSale();
+
+        vm.expectRevert(TokenICO.TokenICO__SaleNotFinalizedAsSuccessful.selector);
+        tokenIco.withdrawFunds();
+        vm.stopPrank();
+
+        assert(
+            ERC20Mock(activeConfig.weth).balanceOf(address(tokenIco))
+                == tokenIco.getTokenAmountFromUsd(activeConfig.weth, usdAmount)
+        );
+    }
+
+    function testWithdrawFundsRevertsIfBalanceOfTokenIcoIsZero() public finalizeSaleSuccessful {
+        vm.startPrank(tokenIco.owner());
+        tokenIco.withdrawFunds();
+        vm.expectRevert(TokenICO.TokenICO__NotEnoughFunds.selector);
+        tokenIco.withdrawFunds();
+        vm.stopPrank();
+    }
+
+    function testWithdrawFundsTransfersFundsToOwner() public finalizeSaleSuccessful {
+        uint256 expectedAmount = ERC20Mock(activeConfig.weth).balanceOf(address(tokenIco));
+
+        vm.startPrank(tokenIco.owner());
+        tokenIco.withdrawFunds();
+        vm.stopPrank();
+
+        assertEq(ERC20Mock(activeConfig.weth).balanceOf(tokenIco.owner()), expectedAmount);
+    }
 }
