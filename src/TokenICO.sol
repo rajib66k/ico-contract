@@ -329,13 +329,14 @@ contract TokenICO is Ownable, ReentrancyGuard {
         }
 
         uint256 paymentTokenAmount = getTokenAmountFromUsd(I_PAYMENT_TOKEN, usdAmount);
-        IERC20(I_PAYMENT_TOKEN).safeTransferFrom(msg.sender, address(this), paymentTokenAmount);
 
         unchecked {
             sTokensSold = tokensSold + saleTokensToBuy;
             userData.saleTokenAmount = userSaleAmount + saleTokensToBuy;
             userData.paymentTokenAmount += paymentTokenAmount;
         }
+
+        IERC20(I_PAYMENT_TOKEN).safeTransferFrom(msg.sender, address(this), paymentTokenAmount);
         emit TokensPurchased(msg.sender, paymentTokenAmount, saleTokensToBuy);
     }
 
