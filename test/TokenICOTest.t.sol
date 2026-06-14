@@ -16,6 +16,7 @@ contract MynaTest is Test {
     event SaleFinalizedSuccessfully(uint256 timestamp);
     event FundsWithdrawn(uint256 amount);
     event UnsoldTokensWithdrawn(uint256 amount);
+    event PaymentRefund(address indexed user, uint256 amount);
 
     MynaToken public mynaToken;
     TokenICO public tokenIco;
@@ -435,5 +436,63 @@ contract MynaTest is Test {
 
         assertEq(balanceAfter - balanceBefore, SALE_TOKENS_AMOUNT);
         assertEq(mynaToken.balanceOf(tokenIco.owner()), expectedOwnerBalance);
+    }
+
+    //////////////////////
+    // Refund Tests     //
+    //////////////////////
+    function finalizeSaleRefund(uint256 usdAmount) internal {
+        _buySaleTokens(user, usdAmount);
+
+        vm.warp(activeConfig.saleEndTime + 1);
+
+        vm.startPrank(tokenIco.owner());
+        tokenIco.finalizeSale();
+        vm.stopPrank();
+    }
+
+    function testRefundRevertsIfSaleNotFinalizedAsRefund() public {
+        vm.startPrank(user);
+        vm.expectRevert(TokenICO.TokenICO__SaleNotFinalizedForRefund.selector);
+        tokenIco.refund();
+        vm.stopPrank();
+    }
+
+    function testRefundRevertsIfUserHasNoTokens(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+
+        finalizeSaleRefund(usdAmount);
+
+        vm.startPrank(user);
+        tokenIco.refund();
+
+        vm.expectRevert(TokenICO.TokenICO__NothingToRefund.selector);
+        tokenIco.refund();
+        vm.stopPrank();
+    }
+
+    function testRefundTransferPaymentTokenToUser(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+
+        finalizeSaleRefund(usdAmount);
+        MockV3Aggregator mockV3Aggregator = MockV3Aggregator(activeConfig.wethUsdPriceFeed);
+        mockV3Aggregator.updateRoundData(2, 2000e8, block.timestamp, block.timestamp);
+
+        uint256 expectedTokenAmount = tokenIco.getTokenAmountFromUsd(activeConfig.weth, usdAmount);
+        uint256 beforeBalance = ERC20Mock(activeConfig.weth).balanceOf(user);
+
+        vm.startPrank(user);
+        vm.expectEmit(true, true, true, true);
+        emit PaymentRefund(user, expectedTokenAmount);
+        tokenIco.refund();
+        vm.stopPrank();
+
+        uint256 afterBalance = ERC20Mock(activeConfig.weth).balanceOf(user);
+
+        assertEq(afterBalance - beforeBalance, expectedTokenAmount);
     }
 }
