@@ -435,6 +435,9 @@ contract TokenICO is Ownable, ReentrancyGuard {
 
         UserData memory userData = sUserData[msg.sender];
         uint256 totalTokenAmount = userData.saleTokenAmount;
+        if (totalTokenAmount == 0) {
+            return 0;
+        }
 
         uint256 intialUnlockToken = totalTokenAmount * I_INITIAL_UNLOCK_PERCENTAGE / PERCENTAGE_PRECISION;
         uint256 lockedToken = totalTokenAmount - intialUnlockToken;
