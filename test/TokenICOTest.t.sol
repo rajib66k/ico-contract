@@ -14,7 +14,8 @@ contract MynaTest is Test {
     event TokensPurchased(address indexed buyer, uint256 paymentTokenAmount, uint256 saleTokenAmount);
     event SaleRefundEnabled(uint256 timestamp);
     event SaleFinalizedSuccessfully(uint256 timestamp);
-    event UnsoldTokensWithdrawn(uint256 unsoldAmount);
+    event FundsWithdrawn(uint256 amount);
+    event UnsoldTokensWithdrawn(uint256 amount);
 
     MynaToken public mynaToken;
     TokenICO public tokenIco;
@@ -25,6 +26,7 @@ contract MynaTest is Test {
     address public user = makeAddr("user");
 
     uint256 public constant STARTING_USER_BALANCE = 1000 ether;
+    uint256 public constant SALE_TOKENS_AMOUNT = 100 ether;
 
     function setUp() public {
         deployer = new DeployICO();
@@ -385,6 +387,8 @@ contract MynaTest is Test {
         uint256 expectedAmount = ERC20Mock(activeConfig.weth).balanceOf(address(tokenIco));
 
         vm.startPrank(tokenIco.owner());
+        vm.expectEmit(false, false, false, true);
+        emit FundsWithdrawn(expectedAmount);
         tokenIco.withdrawFunds();
         vm.stopPrank();
 
@@ -418,18 +422,18 @@ contract MynaTest is Test {
         uint256 expectedOwnerBalance = mynaToken.totalSupply() - soldToken;
 
         vm.startPrank(tokenIco.owner());
-        mynaToken.transfer(address(tokenIco), activeConfig.maxTokenForSale);
+        mynaToken.transfer(address(tokenIco), SALE_TOKENS_AMOUNT);
 
         uint256 balanceBefore = mynaToken.balanceOf(tokenIco.owner());
 
         vm.expectEmit(false, false, false, true);
-        emit UnsoldTokensWithdrawn(activeConfig.maxTokenForSale);
+        emit UnsoldTokensWithdrawn(SALE_TOKENS_AMOUNT);
         tokenIco.withdrawUnsoldTokens();
         vm.stopPrank();
 
         uint256 balanceAfter = mynaToken.balanceOf(tokenIco.owner());
 
-        assertEq(balanceAfter - balanceBefore, activeConfig.maxTokenForSale);
+        assertEq(balanceAfter - balanceBefore, SALE_TOKENS_AMOUNT);
         assertEq(mynaToken.balanceOf(tokenIco.owner()), expectedOwnerBalance);
     }
 }
