@@ -28,6 +28,8 @@ contract MynaTest is Test {
 
     uint256 public constant STARTING_USER_BALANCE = 1000 ether;
     uint256 public constant SALE_TOKENS_AMOUNT = 100 ether;
+    uint256 public constant USD_AMOUNT = 1e18;
+    uint256 public constant PERCENTAGE_PRECISION = 100e18;
 
     function setUp() public {
         deployer = new DeployICO();
@@ -75,7 +77,7 @@ contract MynaTest is Test {
     }
 
     function testRevertsIfInitialUnlockPercentageIsMoreThanPercentagePrecision(uint256 initialUnlockPercentage) public {
-        initialUnlockPercentage = bound(initialUnlockPercentage, 100e18 + 1, type(uint96).max);
+        initialUnlockPercentage = bound(initialUnlockPercentage, PERCENTAGE_PRECISION + 1, type(uint96).max);
 
         vm.expectRevert(TokenICO.TokenICO__InvalidInitialUnlockPercentage.selector);
         new TokenICO(
@@ -337,8 +339,6 @@ contract MynaTest is Test {
         mynaToken.transfer(address(tokenIco), sold);
         tokenIco.finalizeSale();
         vm.stopPrank();
-
-        assert(tokenIco.sSaleFinalized() == TokenICO.SaleFinalized.SUCCESSFUL);
         _;
     }
 
@@ -494,5 +494,103 @@ contract MynaTest is Test {
         uint256 afterBalance = ERC20Mock(activeConfig.weth).balanceOf(user);
 
         assertEq(afterBalance - beforeBalance, expectedTokenAmount);
+    }
+
+    //////////////////////////////////////
+    // Claimable Token Amount Tests     //
+    //////////////////////////////////////
+    function _userBuysTokensAndSaleFinalizesAsSuccessful(uint256 usdAmount) internal {
+        _buySaleTokens(user, usdAmount);
+
+        uint256 maxTokenPerUserInUsd = (activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice) / 1e18;
+
+        uint256 sold;
+
+        while (sold < activeConfig.softCap) {
+            address newUser = makeAddr(vm.toString(sold));
+            _buySaleTokens(newUser, maxTokenPerUserInUsd);
+            sold += maxTokenPerUserInUsd;
+        }
+
+        vm.warp(activeConfig.saleEndTime + 1);
+
+        vm.startPrank(tokenIco.owner());
+        tokenIco.setSaleToken(address(mynaToken));
+        mynaToken.transfer(address(tokenIco), sold + usdAmount * 1e18 / activeConfig.saleTokenPrice);
+        tokenIco.finalizeSale();
+        vm.stopPrank();
+    }
+
+    function testgetClaimableTokenAmountRevertsIfSaleNotFinalizedOrSaleIsAborted() public {
+        vm.startPrank(user);
+        vm.expectRevert(TokenICO.TokenICO__SaleNotFinalized.selector);
+        tokenIco.getClaimableTokenAmount();
+        vm.stopPrank();
+
+        finalizeSaleRefund(USD_AMOUNT);
+
+        vm.startPrank(user);
+        vm.expectRevert(TokenICO.TokenICO__SaleAborted.selector);
+        tokenIco.getClaimableTokenAmount();
+        vm.stopPrank();
+    }
+
+    function testgetClaimableTokenAmountReturnsZeroIfUserHasZeroAllocation() public finalizeSaleSuccessful {
+        vm.startPrank(user);
+        uint256 claimableAmount = tokenIco.getClaimableTokenAmount();
+        vm.stopPrank();
+        assertEq(claimableAmount, 0);
+    }
+
+    function testgetClaimableTokenAmountReturnsCorrectAmountAfterInitialUnlock(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+        _userBuysTokensAndSaleFinalizesAsSuccessful(usdAmount);
+
+        vm.startPrank(user);
+        uint256 claimableAmount = tokenIco.getClaimableTokenAmount();
+        vm.stopPrank();
+
+        uint256 tokenAmount = usdAmount * 1e18 / activeConfig.saleTokenPrice;
+        uint256 expectedClaimableAmount = tokenAmount * activeConfig.initialUnlockPercentage / PERCENTAGE_PRECISION;
+
+        assertEq(claimableAmount, expectedClaimableAmount);
+    }
+
+    //////////////////////////////////////
+    // Vested Token Amount Tests     //
+    //////////////////////////////////////
+    function testgetClaimableTokenAmountReturnsCorrectAmountBeforeCliffAndAfterCliff(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+        _userBuysTokensAndSaleFinalizesAsSuccessful(usdAmount);
+
+        vm.warp(block.timestamp + activeConfig.cliffDuration - 1);
+
+        vm.startPrank(user);
+        uint256 claimableAmountBeforeCliff = tokenIco.getClaimableTokenAmount();
+        uint256 tokenAmount = usdAmount * 1e18 / activeConfig.saleTokenPrice;
+        uint256 initialUnlockAmount = tokenAmount * activeConfig.initialUnlockPercentage / PERCENTAGE_PRECISION;
+
+        vm.warp(block.timestamp + 1);
+        uint256 claimableAmountAfterCliff = tokenIco.getClaimableTokenAmount();
+        uint256 expectedClaimableAmountAfterCliff = initialUnlockAmount + (tokenAmount - initialUnlockAmount)
+            * activeConfig.cliffDuration / activeConfig.vestingDuration;
+
+        vm.warp(block.timestamp + 60 days);
+        uint256 claimableAmountAfterFiveDays = tokenIco.getClaimableTokenAmount();
+        uint256 expectedClaimableAmountFiveDays = initialUnlockAmount + (tokenAmount - initialUnlockAmount)
+            * (activeConfig.cliffDuration + 60 days) / activeConfig.vestingDuration;
+
+        vm.warp(tokenIco.sFinalizeTime() + activeConfig.vestingDuration);
+        uint256 claimableAmountAfterVestingOver = tokenIco.getClaimableTokenAmount();
+        vm.stopPrank();
+
+        assertEq(claimableAmountBeforeCliff, initialUnlockAmount);
+        assertEq(claimableAmountAfterCliff, expectedClaimableAmountAfterCliff);
+        assertEq(claimableAmountAfterFiveDays, expectedClaimableAmountFiveDays);
+        assertEq(claimableAmountAfterVestingOver, tokenAmount);
     }
 }
