@@ -17,6 +17,7 @@ contract MynaTest is Test {
     event FundsWithdrawn(uint256 amount);
     event UnsoldTokensWithdrawn(uint256 amount);
     event PaymentRefund(address indexed user, uint256 amount);
+    event TokensClaimed(address indexed user, uint256 amount);
 
     MynaToken public mynaToken;
     TokenICO public tokenIco;
@@ -592,5 +593,59 @@ contract MynaTest is Test {
         assertEq(claimableAmountAfterCliff, expectedClaimableAmountAfterCliff);
         assertEq(claimableAmountAfterFiveDays, expectedClaimableAmountFiveDays);
         assertEq(claimableAmountAfterVestingOver, tokenAmount);
+    }
+
+    ////////////////////////////////
+    // Claim Allocation Tests     //
+    ////////////////////////////////
+    function testClaimAllocationRevertsIfSaleNotFinalizedOrSaleIsAborted() public {
+        vm.startPrank(user);
+        vm.expectRevert(TokenICO.TokenICO__SaleNotFinalized.selector);
+        tokenIco.claim();
+        vm.stopPrank();
+
+        finalizeSaleRefund(USD_AMOUNT);
+
+        vm.startPrank(user);
+        vm.expectRevert(TokenICO.TokenICO__SaleAborted.selector);
+        tokenIco.claim();
+        vm.stopPrank();
+    }
+
+    function testClaimAllocationRevertsIfUserHasNoClaimableTokens(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+        _userBuysTokensAndSaleFinalizesAsSuccessful(usdAmount);
+
+        vm.startPrank(user);
+        tokenIco.claim();
+
+        vm.expectRevert(TokenICO.TokenICO__NeedsMoreThanZero.selector);
+        tokenIco.claim();
+        vm.stopPrank();
+    }
+
+    function testClaimAllocationTransfersClaimableTokensToUser(uint256 usdAmount) public {
+        usdAmount = bound(
+            usdAmount, tokenIco.I_SALE_TOKEN_PRICE(), activeConfig.maxTokenPerUser * activeConfig.saleTokenPrice / 1e18
+        );
+        _userBuysTokensAndSaleFinalizesAsSuccessful(usdAmount);
+
+        uint256 tokenAmount = usdAmount * 1e18 / activeConfig.saleTokenPrice;
+        uint256 initialUnlockAmount = tokenAmount * activeConfig.initialUnlockPercentage / PERCENTAGE_PRECISION;
+
+        vm.startPrank(user);
+        vm.expectEmit(true, true, true, true);
+        emit TokensClaimed(user, initialUnlockAmount);
+        tokenIco.claim();
+        vm.stopPrank();
+
+        (, uint256 claimedAmount,) = tokenIco.sUserData(user);
+
+        assertEq(mynaToken.balanceOf(user), initialUnlockAmount);
+        assertEq(claimedAmount, initialUnlockAmount);
+        assertEq(tokenIco.getClaimableTokenAmount(), 0);
+        assertEq(tokenIco.sTokensClaimed(), initialUnlockAmount);
     }
 }
